@@ -1,0 +1,47 @@
+Copyright 2026 Seiya Tanaka and George Chikenji
+
+Except for the parts noted below, the code in this repository is licensed under
+the Apache License, Version 2.0; see LICENSE.
+
+1. ColabDesign (https://github.com/sokrypton/ColabDesign), v1.1.3, is
+   distributed under the Beer-Ware License (Revision 42), whose notice it asks
+   to be retained:
+
+     ---------------------------------------------------------------------------
+     "THE BEER-WARE LICENSE" (Revision 42):
+     <so3@mit.edu> wrote this file.  As long as you retain this notice you
+     can do whatever you want with this stuff. If we meet some day, and you
+     think this stuff is worth it, you can buy me a beer in return.
+     Sergey Ovchinnikov
+     ---------------------------------------------------------------------------
+
+   The af2rank class in predict_af2rank.py is taken from the AF2Rank example
+   notebook distributed with ColabDesign (af/examples/AF2Rank.ipynb) and
+   modified for this repository. save_recycles.py subclasses its
+   mk_af_model and reproduces part of the run method of its _af_design class.
+   One hunk of patches/01-evoformer-capture.patch modifies its
+   colabdesign/af/model.py.
+
+2. AlphaFold (https://github.com/google-deepmind/alphafold), Copyright 2021
+   DeepMind Technologies Limited, is licensed under the Apache License,
+   Version 2.0, and ColabDesign includes it. The remaining hunks of
+   patches/01-evoformer-capture.patch modify three of those files:
+   colabdesign/af/alphafold/model/layer_stack.py, modules.py and
+   modules_multimer.py.
+
+The methods this code builds on are described in:
+  AlphaFold2: J. Jumper, R. Evans, A. Pritzel, et al., Nature 596, 583-589
+    (2021).
+  AlphaFold-Multimer: R. Evans, M. O'Neill, A. Pritzel, et al., bioRxiv (2022),
+    doi:10.1101/2021.10.04.463034.
+  AF2Rank: J. P. Roney and S. Ovchinnikov, Phys. Rev. Lett. 129, 238101 (2022).
+
+AlphaFold2 and AlphaFold-Multimer network parameters are not distributed here.
+They are released by DeepMind under CC BY 4.0 and are fetched separately; see
+README.md.
+
+The structures under example/ relate to Protein Data Bank entries 1IRA and
+1R8S, as distributed with the Protein-Protein Docking Benchmark 5.5. Each
+native.pdb is that experimental structure, and the files under
+templates_predicted-monomers/ were produced by docking monomers taken from an
+AlphaFold-Multimer prediction of the same target.

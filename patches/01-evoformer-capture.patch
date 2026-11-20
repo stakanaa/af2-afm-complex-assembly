@@ -1,0 +1,233 @@
+# Capture the pair representation after every Evoformer block.
+#
+# Base: ColabDesign v1.1.3  (https://github.com/sokrypton/ColabDesign)
+# Apply from the root of an installed colabdesign package:
+#     patch -p1 < 01-evoformer-capture.patch
+#
+# This patch is OPTIONAL. It is needed only to reproduce the
+# Evoformer contact-map analysis; all other results run against an
+# unmodified ColabDesign.
+#
+# Three of the four files it modifies are AlphaFold files that
+# ColabDesign includes (Copyright 2021 DeepMind Technologies Limited,
+# Apache License 2.0); the fourth, colabdesign/af/model.py, is
+# ColabDesign's own (Beer-Ware License). See NOTICE.
+#
+# It makes layer_stack return each block's output, threads that
+# through the AF2 and AF-Multimer Evoformer trunks, and exposes it as
+# model.aux['output_iteration']. Keeping 48 blocks of pair
+# representation is memory-hungry, so use it on a single target: for a
+# 347-residue complex the saved array is 2.8 GB.
+#
+# 'patch' reports "fuzz 1" on modules.py because of trailing whitespace
+# in the context lines; the result is still byte-for-byte correct.
+#
+--- a/colabdesign/af/alphafold/model/layer_stack.py
++++ b/colabdesign/af/alphafold/model/layer_stack.py
+@@ -24,7 +24,8 @@
+ import jax
+ import jax.numpy as jnp
+ 
+-LayerStackCarry = collections.namedtuple('LayerStackCarry', ['x', 'rng'])
++LayerStackCarry = collections.namedtuple('LayerStackCarry',
++                                         ['x', 'rng', 'feature_dict'])
+ LayerStackScanned = collections.namedtuple('LayerStackScanned',
+                                            ['i', 'args_ys'])
+ 
+@@ -76,6 +77,16 @@
+     self._unroll = unroll
+ 
+   def __call__(self, x, *args_ys):
++    # Allocate a buffer holding the output of every block, so that the
++    # per-block representations survive the hk.scan below.
++    feature_dict = {}
++    if isinstance(x[0][0], dict):
++      for key, value in x[0][0].items():
++        if key == 'msa':
++          feature_dict[key] = jnp.zeros((self._count,) + value[0, :, :].shape)
++        else:
++          feature_dict[key] = jnp.zeros((self._count,) + value.shape)
++
+     count = self._count
+     if hk.running_init():
+       # At initialization time, we run just one layer but add an extra first
+@@ -147,15 +158,24 @@
+             rng, rng_ = jax.random.split(rng)
+             with hk.with_rng(rng_):
+               out_x, z = self._call_wrapped(carry.x, *scanned.args_ys)
+-        return LayerStackCarry(x=out_x, rng=rng), z
++            # Record this block's output.
++            if isinstance(out_x[0][0], dict):
++              for key in out_x[0][0].keys():
++                if key == 'msa':
++                  carry.feature_dict[key] = carry.feature_dict[key].at[scanned.i].set(out_x[0][0][key][0, :, :])
++                else:
++                  carry.feature_dict[key] = carry.feature_dict[key].at[scanned.i].set(out_x[0][0][key])
++        return LayerStackCarry(x=out_x, rng=rng,
++                               feature_dict=carry.feature_dict), z
+ 
+-      carry = LayerStackCarry(x=x, rng=hk.maybe_next_rng_key())
++      carry = LayerStackCarry(x=x, rng=hk.maybe_next_rng_key(),
++                              feature_dict=feature_dict)
+       scanned = LayerStackScanned(i=jnp.arange(count, dtype=jnp.int32),
+                                   args_ys=args_ys)
+ 
+       carry, zs = hk.scan(
+           layer, carry, scanned, length=count, unroll=self._unroll)
+-      return carry.x, zs
++      return carry.x, zs, carry.feature_dict
+ 
+   def _call_wrapped(self,
+                     x: jnp.ndarray,
+@@ -262,13 +282,13 @@
+       _check_no_varargs(f)
+       @functools.wraps(f)
+       def wrapped(*args):
+-        ret = _LayerStackNoState(
+-            f, num_layers, unroll=unroll, name=name)(args, None)[0]
++        ret, _, feature_dict = _LayerStackNoState(
++            f, num_layers, unroll=unroll, name=name)(args, None)
+         if len(args) == 1:
+           # If the function takes a single argument, we must also return a
+           # single value, and not a tuple of length 1.
+           ret = ret[0]
+-        return ret
++        return ret[0], ret[1], feature_dict
+ 
+     return wrapped
+   return iterate
+--- a/colabdesign/af/alphafold/model/modules.py
++++ b/colabdesign/af/alphafold/model/modules.py
+@@ -112,7 +112,7 @@
+ 
+     # Compute representations for each batch element and average.
+     evoformer_module = EmbeddingsAndEvoformer(self.config.embeddings_and_evoformer, self.global_config)
+-    representations = evoformer_module(batch)    
++    representations, output_iteration = evoformer_module(batch)    
+     
+     head_factory = {
+           'masked_msa': MaskedMsaHead,
+\ No newline at end of file
+@@ -128,6 +128,8 @@
+       heads[name] = head_factory[name](head_config, self.global_config)
+     
+     ret = {'representations':representations}
++    # per-Evoformer-block representations (Evoformer analysis)
++    ret['output_iteration'] = output_iteration
+     for name, head in heads.items():
+       if name in ('predicted_lddt', 'predicted_aligned_error'):
+         continue
+\ No newline at end of file
+@@ -244,7 +246,7 @@
+       block = hk.remat(block)
+ 
+     res_stack = layer_stack.layer_stack(c.num_block)(block)
+-    pair_act, safe_key = res_stack((pair_act, safe_key))
++    pair_act, safe_key, _ = res_stack((pair_act, safe_key))
+     return pair_act
+ 
+ 
+\ No newline at end of file
+@@ -1498,7 +1500,7 @@
+           return (extra_evoformer_output, safe_key)
+         if gc.use_remat: extra_msa_stack_fn = hk.remat(extra_msa_stack_fn)
+         extra_msa_stack = layer_stack.layer_stack(c.extra_msa_stack_num_block)(extra_msa_stack_fn)
+-        extra_msa_output, safe_key = extra_msa_stack((extra_msa_stack_input, safe_key))
++        extra_msa_output, safe_key, _ = extra_msa_stack((extra_msa_stack_input, safe_key))
+         pair_activations = extra_msa_output['pair']
+ 
+       evoformer_input = {'msa': msa_activations,'pair': pair_activations}
+\ No newline at end of file
+@@ -1564,7 +1566,7 @@
+           return (evoformer_output, safe_key)
+         if gc.use_remat: evoformer_fn = hk.remat(evoformer_fn)
+         evoformer_stack = layer_stack.layer_stack(c.evoformer_num_block)(evoformer_fn)
+-        evoformer_output, safe_key = evoformer_stack((evoformer_input, safe_key))
++        evoformer_output, safe_key, output_iteration = evoformer_stack((evoformer_input, safe_key))
+         msa_activations = evoformer_output['msa']
+         pair_activations = evoformer_output['pair']
+ 
+\ No newline at end of file
+@@ -1584,7 +1586,7 @@
+       for k, v in output.items():
+         if v.dtype == jnp.bfloat16:
+           output[k] = v.astype(jnp.float32)
+-    return output
++    return output, output_iteration
+   
+ ####################################################################
+ ####################################################################
+\ No newline at end of file
+--- a/colabdesign/af/alphafold/model/modules_multimer.py
++++ b/colabdesign/af/alphafold/model/modules_multimer.py
+@@ -85,7 +85,7 @@
+         self.config.embeddings_and_evoformer, self.global_config)
+ 
+     safe_key, safe_subkey = safe_key.split()
+-    representations = embedding_module(batch, safe_key=safe_subkey)
++    representations, output_iteration = embedding_module(batch, safe_key=safe_subkey)
+ 
+     self.representations = representations
+     self.batch = batch
+@@ -119,6 +119,8 @@
+ 
+     ret = {}
+     ret['representations'] = representations
++    # per-Evoformer-block representations (Evoformer analysis)
++    ret['output_iteration'] = output_iteration
+ 
+     for name, (head_config, module) in self.heads.items():
+       if name == 'structure_module' and structure_module_output is not None:
+@@ -389,7 +391,7 @@
+       extra_evoformer_stack = layer_stack.layer_stack(
+           c.extra_msa_stack_num_block)(
+               extra_evoformer_fn)
+-      extra_evoformer_output, safe_key = extra_evoformer_stack(
++      extra_evoformer_output, safe_key, _ = extra_evoformer_stack(
+           (extra_evoformer_input, safe_subkey))
+ 
+       pair_activations = extra_evoformer_output['pair']
+@@ -429,10 +431,10 @@
+           evoformer_fn)
+ 
+       def run_evoformer(evoformer_input):
+-        evoformer_output, _ = evoformer_stack((evoformer_input, safe_subkey))
+-        return evoformer_output
++        evoformer_output, _, output_iteration = evoformer_stack((evoformer_input, safe_subkey))
++        return evoformer_output, output_iteration
+ 
+-      evoformer_output = run_evoformer(evoformer_input)
++      evoformer_output, output_iteration = run_evoformer(evoformer_input)
+ 
+       msa_activations = evoformer_output['msa']
+       pair_activations = evoformer_output['pair']
+@@ -457,7 +459,7 @@
+         if v.dtype == jnp.bfloat16:
+           output[k] = v.astype(jnp.float32)
+ 
+-    return output
++    return output, output_iteration
+ 
+ 
+ class TemplateEmbedding(hk.Module):
+@@ -662,7 +664,7 @@
+     template_stack = layer_stack.layer_stack(
+         c.template_pair_stack.num_block)(
+             template_iteration_fn)
+-    act, safe_key = template_stack((act, safe_subkey))
++    act, safe_key, _ = template_stack((act, safe_subkey))
+ 
+     act = common_modules.LayerNorm(
+         axis=[-1],
+--- a/colabdesign/af/model.py
++++ b/colabdesign/af/model.py
+@@ -207,6 +207,9 @@
+                   "i_cmap":         get_contact_map(outputs, opt["i_con"]["cutoff"]),
+                   "prev":           outputs["prev"]})
+ 
++      # per-Evoformer-block representations (Evoformer analysis)
++      aux['output_iteration'] = outputs['output_iteration']
++
+       #######################################################################
+       # LOSS
+       #######################################################################

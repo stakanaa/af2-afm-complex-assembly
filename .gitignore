@@ -1,0 +1,15 @@
+# AlphaFold network parameters (fetched separately, see README.md)
+params/
+*.npz
+
+# Predictions and captured representations
+output/
+*.npy
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
